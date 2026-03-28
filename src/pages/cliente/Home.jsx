@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import { supabase } from '../../lib/supabase'
@@ -6,6 +6,7 @@ import { formatPrice } from '../../lib/pricing'
 import { getCurrentPosition } from '../../lib/geo'
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api'
 import { DARK_MAP_STYLE } from '../../lib/paseadorTheme'
+import toast from 'react-hot-toast'
 
 const BUENOS_AIRES = { lat: -34.6037, lng: -58.3816 }
 
@@ -28,6 +29,11 @@ export default function ClienteHome() {
   const [userPos, setUserPos] = useState(null)
   const [nearbyWalkers, setNearbyWalkers] = useState([])
 
+  // Track previous walk status to detect transitions
+  const prevWalkStatusRef = useRef(null)
+  const activeWalkRef = useRef(null)
+  const refreshHomeRef = useRef(null)
+
   const { isLoaded } = useJsApiLoader({
     googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_KEY || '',
   })
@@ -46,12 +52,30 @@ export default function ClienteHome() {
         { event: '*', schema: 'public', table: 'walk_requests', filter: `cliente_id=eq.${profile.id}` },
         (payload) => {
           const updated = payload.new
+          const prev = prevWalkStatusRef.current
+          console.log('[Realtime] home walk update:', prev, '->', updated.status)
+
           if (['accepted', 'in_progress', 'pending'].includes(updated.status)) {
+            prevWalkStatusRef.current = updated.status
+            activeWalkRef.current = updated
             setActiveWalk(updated)
+
             if (updated.status === 'accepted' || updated.status === 'in_progress') {
               fetchWalkerName(updated.id)
             }
+
+            // Navegar al seguimiento cuando el paseador acepta
+            if (updated.status === 'accepted' && prev === 'pending') {
+              toast.success('¡Tu paseador aceptó el paseo!', {
+                duration: 6000,
+                icon: '🐾',
+                style: { background: '#1c1c1e', color: '#fff', fontWeight: '600' },
+              })
+              navigate('/cliente/seguimiento')
+            }
           } else {
+            prevWalkStatusRef.current = null
+            activeWalkRef.current = null
             setActiveWalk(null)
             setWalkerName(null)
           }
@@ -59,9 +83,65 @@ export default function ClienteHome() {
       )
       .subscribe()
 
+    // Polling fallback cada 5s por si Realtime falla
+    const pollInterval = setInterval(() => {
+      refreshHomeRef.current?.()
+    }, 5000)
+
     const walkerInterval = setInterval(fetchNearbyWalkers, 30000)
-    return () => { supabase.removeChannel(channel); clearInterval(walkerInterval) }
+
+    return () => {
+      supabase.removeChannel(channel)
+      clearInterval(walkerInterval)
+      clearInterval(pollInterval)
+    }
   }, [profile.id])
+
+  // Función de polling: verifica si el walk cambió de estado
+  const refreshHomeStatus = useCallback(async () => {
+    const current = activeWalkRef.current
+    // Solo hacer polling si hay un walk pendiente
+    if (!current?.id || current.status !== 'pending') return
+
+    const { data } = await supabase
+      .from('walk_requests')
+      .select('*')
+      .eq('id', current.id)
+      .maybeSingle()
+
+    if (!data) return
+
+    const prev = prevWalkStatusRef.current
+    if (data.status === prev) return  // sin cambio
+
+    console.log('[Poll] home walk status change:', prev, '->', data.status)
+    prevWalkStatusRef.current = data.status
+    activeWalkRef.current = data
+    setActiveWalk(data)
+
+    if (data.status === 'accepted' || data.status === 'in_progress') {
+      fetchWalkerName(data.id)
+    }
+
+    if (data.status === 'accepted' && prev === 'pending') {
+      toast.success('¡Tu paseador aceptó el paseo!', {
+        duration: 6000,
+        icon: '🐾',
+        style: { background: '#1c1c1e', color: '#fff', fontWeight: '600' },
+      })
+      navigate('/cliente/seguimiento')
+    }
+
+    if (data.status === 'completed' || data.status === 'cancelled') {
+      setActiveWalk(null)
+      activeWalkRef.current = null
+      prevWalkStatusRef.current = null
+      setWalkerName(null)
+    }
+  }, [navigate])
+
+  // Mantener ref siempre fresco para el setInterval
+  refreshHomeRef.current = refreshHomeStatus
 
   async function fetchActiveWalk() {
     const { data } = await supabase
@@ -72,7 +152,11 @@ export default function ClienteHome() {
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle()
+
     setActiveWalk(data)
+    activeWalkRef.current = data
+    prevWalkStatusRef.current = data?.status || null
+
     if (data && (data.status === 'accepted' || data.status === 'in_progress')) {
       await fetchWalkerName(data.id)
     }
@@ -103,6 +187,8 @@ export default function ClienteHome() {
     if (!activeWalk) return
     await supabase.from('walk_requests').update({ status: 'cancelled' }).eq('id', activeWalk.id)
     setActiveWalk(null)
+    activeWalkRef.current = null
+    prevWalkStatusRef.current = null
   }
 
   const onMapLoad = useCallback(() => {}, [])

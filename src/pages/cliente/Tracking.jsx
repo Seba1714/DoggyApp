@@ -6,6 +6,7 @@ import { supabase } from '../../lib/supabase'
 import { StatusBadge } from '../../components/StatusBadge'
 import { EmptyState } from '../../components/EmptyState'
 import { formatPrice } from '../../lib/pricing'
+import toast from 'react-hot-toast'
 
 const BUENOS_AIRES = { lat: -34.6037, lng: -58.3816 }
 
@@ -41,9 +42,13 @@ export default function Tracking() {
   const mapRef = useRef(null)
   const timerRef = useRef(null)
   const phaseTimerRef = useRef(null)
+  const pollRef = useRef(null)
   const channelsRef = useRef([])
   const walkRef = useRef(null)
   const phaseIndexRef = useRef(0)
+  const prevStatusRef = useRef(null)
+  // Ref to always-fresh refreshWalkStatus for polling interval
+  const refreshWalkStatusRef = useRef(null)
 
   const { isLoaded } = useJsApiLoader({
     googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_KEY || '',
@@ -54,6 +59,7 @@ export default function Tracking() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
       if (phaseTimerRef.current) clearInterval(phaseTimerRef.current)
+      if (pollRef.current) clearInterval(pollRef.current)
       channelsRef.current.forEach(ch => supabase.removeChannel(ch))
     }
   }, [])
@@ -130,6 +136,7 @@ export default function Tracking() {
 
     setWalk(walkData)
     walkRef.current = walkData
+    prevStatusRef.current = walkData.status
 
     const walkChannel = supabase
       .channel(`walk-status-${walkData.id}-${Date.now()}`)
@@ -138,10 +145,25 @@ export default function Tracking() {
         filter: `id=eq.${walkData.id}`,
       }, (payload) => {
         console.log('[Realtime] walk UPDATE', payload.new?.status)
+        const prev = prevStatusRef.current
+        prevStatusRef.current = payload.new.status
+
         setWalk(payload.new)
         walkRef.current = payload.new
-        if (payload.new.status === 'in_progress') startTimer()
-        if (payload.new.status === 'accepted') fetchWalker(walkData.id)
+
+        if (payload.new.status === 'in_progress' && prev !== 'in_progress') startTimer()
+
+        if (payload.new.status === 'accepted') {
+          fetchWalker(walkData.id)
+          if (prev === 'pending') {
+            toast.success('¡Tu paseador está en camino!', {
+              duration: 6000,
+              icon: '🐾',
+              style: { background: '#1c1c1e', color: '#fff', fontWeight: '600' },
+            })
+          }
+        }
+
         if (payload.new.status === 'completed' || payload.new.status === 'cancelled') {
           navigate('/cliente')
         }
@@ -157,7 +179,49 @@ export default function Tracking() {
     }
     if (walkData.status === 'in_progress') startTimer()
     setLoading(false)
+
+    // Polling fallback cada 5s por si Realtime falla
+    pollRef.current = setInterval(() => {
+      refreshWalkStatusRef.current?.()
+    }, 5000)
   }
+
+  // Siempre fresco en ref para el polling interval
+  const refreshWalkStatus = useCallback(async () => {
+    if (!walkRef.current?.id) return
+    const { data } = await supabase
+      .from('walk_requests')
+      .select('*')
+      .eq('id', walkRef.current.id)
+      .maybeSingle()
+
+    if (!data) return
+
+    const prev = prevStatusRef.current
+    if (data.status === prev) return  // sin cambio, no hacer nada
+
+    console.log('[Poll] walk status change:', prev, '->', data.status)
+    prevStatusRef.current = data.status
+    setWalk(data)
+    walkRef.current = data
+
+    if (data.status === 'in_progress' && prev !== 'in_progress') startTimer()
+
+    if (data.status === 'accepted' && prev === 'pending') {
+      fetchWalker(data.id)
+      toast.success('¡Tu paseador está en camino!', {
+        duration: 6000,
+        icon: '🐾',
+        style: { background: '#1c1c1e', color: '#fff', fontWeight: '600' },
+      })
+    }
+
+    if (data.status === 'completed' || data.status === 'cancelled') {
+      navigate('/cliente')
+    }
+  }, [navigate])
+
+  refreshWalkStatusRef.current = refreshWalkStatus
 
   async function fetchWalker(requestId) {
     const { data: assignment } = await supabase
