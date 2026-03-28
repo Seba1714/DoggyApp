@@ -275,37 +275,76 @@ export default function PaseadorHome() {
   // ── Accept / start / finish ───────────────────────────────────
   async function acceptRequest(req) {
     setAccepting(true)
-    const { error: e1 } = await supabase.from('walk_requests').update({ status: 'accepted' }).eq('id', req.id)
-    if (e1) { toast.error('Error al aceptar'); setAccepting(false); return }
-    const { error: e2 } = await supabase.from('walk_assignments').insert({ request_id: req.id, paseador_id: profile.id })
-    if (e2) { toast.error('Error al asignar'); setAccepting(false); return }
-    toast.success('Paseo aceptado!')
-    setSelectedRequest(null)
-    setAccepting(false)
-    setRequests(prev => prev.filter(r => r.id !== req.id))
-    fetchActiveWalks()
+    try {
+      const { error: e1 } = await supabase
+        .from('walk_requests')
+        .update({ status: 'accepted' })
+        .eq('id', req.id)
+      if (e1) {
+        console.error('[acceptRequest] update error:', e1)
+        toast.error('Error al aceptar: ' + e1.message)
+        return
+      }
+
+      const { error: e2 } = await supabase
+        .from('walk_assignments')
+        .insert({ request_id: req.id, paseador_id: profile.id })
+      if (e2) {
+        console.error('[acceptRequest] insert error:', e2)
+        // Si ya existe la asignación (otro paseador aceptó antes) revertir
+        if (e2.code === '23505') {
+          toast.error('Este paseo ya fue tomado por otro paseador')
+          await supabase.from('walk_requests').update({ status: 'pending' }).eq('id', req.id)
+        } else {
+          toast.error('Error al asignar: ' + e2.message)
+        }
+        return
+      }
+
+      toast.success('¡Paseo aceptado! 🐾')
+      setSelectedRequest(null)
+      setRequests(prev => prev.filter(r => r.id !== req.id))
+      fetchActiveWalks()
+    } catch (err) {
+      console.error('[acceptRequest] exception:', err)
+      toast.error('Error inesperado: ' + (err?.message || 'desconocido'))
+    } finally {
+      setAccepting(false)
+    }
   }
 
   async function startWalk(walkId) {
     setStarting(p => ({ ...p, [walkId]: true }))
-    const { error } = await supabase.from('walk_requests')
-      .update({ status: 'in_progress', started_at: new Date().toISOString() }).eq('id', walkId)
-    if (error) { toast.error('Error al iniciar'); setStarting(p => ({ ...p, [walkId]: false })); return }
-    toast.success('Paseo iniciado!')
-    setStarting(p => ({ ...p, [walkId]: false }))
-    fetchActiveWalks()
+    try {
+      const { error } = await supabase.from('walk_requests')
+        .update({ status: 'in_progress', started_at: new Date().toISOString() }).eq('id', walkId)
+      if (error) { toast.error('Error al iniciar: ' + error.message); return }
+      toast.success('Paseo iniciado!')
+      fetchActiveWalks()
+    } catch (err) {
+      console.error('[startWalk] exception:', err)
+      toast.error('Error inesperado')
+    } finally {
+      setStarting(p => ({ ...p, [walkId]: false }))
+    }
   }
 
   async function finishWalk(walkId) {
     setFinishing(p => ({ ...p, [walkId]: true }))
-    const { error } = await supabase.from('walk_requests').update({ status: 'completed' }).eq('id', walkId)
-    if (error) { toast.error('Error al finalizar'); setFinishing(p => ({ ...p, [walkId]: false })); return }
-    toast.success('Paseo completado! 🎉')
-    warnedRef.current.delete(walkId)
-    setFinishing(p => ({ ...p, [walkId]: false }))
-    if (expandedWalk === walkId) setExpandedWalk(null)
-    fetchActiveWalks()
-    fetchStats()
+    try {
+      const { error } = await supabase.from('walk_requests').update({ status: 'completed' }).eq('id', walkId)
+      if (error) { toast.error('Error al finalizar: ' + error.message); return }
+      toast.success('Paseo completado! 🎉')
+      warnedRef.current.delete(walkId)
+      if (expandedWalk === walkId) setExpandedWalk(null)
+      fetchActiveWalks()
+      fetchStats()
+    } catch (err) {
+      console.error('[finishWalk] exception:', err)
+      toast.error('Error inesperado')
+    } finally {
+      setFinishing(p => ({ ...p, [walkId]: false }))
+    }
   }
 
   function dismissRequest(reqId) {
